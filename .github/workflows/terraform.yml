@@ -1,31 +1,59 @@
 name: Terraform Plan
+
 on: [push, pull_request]
+
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   plan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write   # harmless; useful if you later switch to OIDC
-    steps:
-      - uses: actions/checkout@v4
+      id-token: write  # harmless; useful if you later switch to OIDC
+    env:
+      TF_IN_AUTOMATION: "true"
+      AWS_REGION: us-east-1   # must match provider "aws" region
 
-      - uses: hashicorp/setup-terraform@v3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.5
 
+      # ✅ Helpful fail-fast if secrets are missing (esp. on fork PRs)
+      - name: Check AWS secrets exist
+        env:
+          HAS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          HAS_SECRET: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$HAS_KEY" ] || [ -z "$HAS_SECRET" ]; then
+            echo "::error::AWS secrets not found. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Settings > Secrets and variables > Actions."
+            echo "Secrets are NOT available for pull_request events from forks."
+            exit 1
+          fi
+
+      # 🔐 Configure AWS credentials (static keys)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1    # <- match provider "aws" region
+          aws-region: ${{ env.AWS_REGION }}
 
+      # 🧪 Quick identity sanity check
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
       - name: Terraform Init
         run: terraform -chdir=modules/module-1 init -input=false -reconfigure
+
+      - name: Terraform Validate (optional but nice)
+        run: terraform -chdir=modules/module-1 validate
 
       - name: Terraform Plan
         run: terraform -chdir=modules/module-1 plan -input=false
