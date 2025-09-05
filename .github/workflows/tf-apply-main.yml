@@ -1,5 +1,4 @@
-name: 'Terraform Apply'
-
+name: "Terraform Apply"
 
 on:
   workflow_dispatch:
@@ -7,94 +6,112 @@ on:
       module:
         type: choice
         description: "Select which module to deploy"
-        options: 
-        - module-1
-        - module-2
+        options:
+          - module-1
+          - module-2
         required: true
 
-permissions: write-all
+# keep permissions minimal; write-all is rarely needed
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   terraform:
-    name: 'Terraform'
+    name: "Terraform"
     runs-on: ubuntu-latest
     environment: production
-    env: 
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: "us-east-1"
+
+  
+    env:
+      # ✅ Use the exact secret names you created in GitHub
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}          
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }} 
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      TF_IN_AUTOMATION: "true"
 
     defaults:
       run:
         shell: bash
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.10.5
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
 
-    - name: Set Account ID
-      id: account
-      run: |
-        echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
+      # 🔎 Fail fast if secrets are missing (or PR from fork)
+      - name: Check AWS secrets exist
+        run: |
+          if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
+            echo "::error::AWS secrets not found. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Settings > Secrets and variables > Actions. Note: secrets are NOT available to PRs from forks."
+            exit 1
+          fi
 
-    - name: Check previous AWSGoat Deployment
-      id: check 
-      run: |
-        echo ${{ env.ACCOUNT_ID }}
-        aws s3api head-object --bucket do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }} --key terraform.tfstate
-      continue-on-error: true
+      # 🧪 Identity sanity check
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
-    - name: Exit if previous deployment exists
-      if: steps.check.outcome == 'success' 
-      run: |
-        echo "A Previous AWSGoat deployment exists, run the Terraform Destroy Action"
-        exit 1
+      - name: Set Account ID
+        id: account
+        run: |
+          echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
 
-    # Initialize a new or existing Terraform working directory 
-    - name: Terraform Init
-      run: | 
-        cd modules/${{ github.event.inputs.module }}
-        terraform init 
-        
-    # Installs boto3
-    - uses: actions/setup-python@v5
-      with:
-        python-version: 3
-    - name: install
-      run: |
-        pip install boto3
-    
-    - name: Terraform Plan
-      id: plan 
-      run: | 
-        cd modules/${{ github.event.inputs.module }}
-        terraform plan -input=false
-      continue-on-error: false
-      
-    - name: Terraform Plan Status
-      if: steps.plan.outcome == 'failure'
-      run: exit 1
-    
-    - name: Terraform Apply
-      run: | 
-        cd modules/${{ github.event.inputs.module }}
-        terraform apply -auto-approve -input=false
-      continue-on-error: false
+      - name: Check previous AWSGoat Deployment
+        id: check
+        run: |
+          echo "Account: ${{ env.ACCOUNT_ID }}"
+          aws s3api head-object --bucket do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }} --key terraform.tfstate
+        continue-on-error: true
 
-    # Copy tfstate file to s3 bucket
-    - name: Copy terraform.tfstate file to s3bucket
-      if: always()
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        aws s3 cp ./terraform.tfstate s3://do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }}/terraform.tfstate 
+      - name: Exit if previous deployment exists
+        if: steps.check.outcome == 'success'
+        run: |
+          echo "A Previous AWSGoat deployment exists, run the Terraform Destroy Action"
+          exit 1
 
-    # Terraform Output the API Gateway url
-    - name: Application URL
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        terraform output
+      # Initialize a new or existing Terraform working directory
+      - name: Terraform Init
+        run: |
+          cd modules/${{ github.event.inputs.module }}
+          terraform init -input=false -reconfigure
+
+      # Python for boto3 if your modules/scripts need it
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install boto3
+        run: pip install --no-input boto3
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd modules/${{ github.event.inputs.module }}
+          terraform plan -input=false
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        run: |
+          cd modules/${{ github.event.inputs.module }}
+          terraform apply -auto-approve -input=false
+
+      # Copy tfstate file to s3 bucket
+      - name: Copy terraform.tfstate file to s3bucket
+        if: always()
+        run: |
+          cd modules/${{ github.event.inputs.module }}
+          aws s3 cp ./terraform.tfstate s3://do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }}/terraform.tfstate
+
+      # Terraform Output the API Gateway url
+      - name: Application URL
+        run: |
+          cd modules/${{ github.event.inputs.module }}
+          terraform output
